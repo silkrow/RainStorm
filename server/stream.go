@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,7 +12,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -57,10 +60,191 @@ func StreamServerInit(id int) *StreamServer {
 	}
 }
 
+func StreamProcessing(st *StreamServer) {
+	go workerHTTPServer(st)
+	go tcpServer(st)
+
+	select {}
+}
+
 func workerHTTPServer(st *StreamServer) {
 	http.HandleFunc("/register", st.httpHandleRegister)
-	fmt.Println("Worker server on")
+	http.HandleFunc("/rainstorm", st.httpHandleRainStorm)
+	fmt.Println("Stream server on port " + WORKER_PORT)
 	log.Fatal(http.ListenAndServe(":"+WORKER_PORT, nil))
+}
+
+func (st *StreamServer) httpHandleRainStorm(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		if st.stype != TYPE_LEADER {
+			http.Error(w, "Not the leader", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse request body
+		var request struct {
+			Exe1 string            `json:"exe1"`
+			Exe2 string            `json:"exe2"`
+			Info map[string]string `json:"info"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Validate info map
+		op1, op2, f1, f2, num := request.Info["op1"], request.Info["op2"], request.Info["f1"], request.Info["f2"], request.Info["num"]
+		if op1 == "" || op2 == "" || f1 == "" || f2 == "" || num == "" {
+			http.Error(w, "Missing input parameters", http.StatusBadRequest)
+			return
+		}
+
+		// Convert num to integer
+		numVal, err := strconv.Atoi(num)
+		if err != nil || numVal <= 0 {
+			http.Error(w, "Invalid value for 'num'", http.StatusBadRequest)
+			return
+		}
+
+		// Decode executables
+		op1File, err := decodeAndSaveExecutable(request.Exe1, "op1_executable")
+		if err != nil {
+			http.Error(w, "Failed to process executable op1: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer os.Remove(op1File) // Clean up temp file
+
+		op2File, err := decodeAndSaveExecutable(request.Exe2, "op2_executable")
+		if err != nil {
+			http.Error(w, "Failed to process executable op2: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer os.Remove(op2File) // Clean up temp file
+
+		registerWorker("http://fa24-cs425-6802.cs.illinois.edu:4445/register", op1, &request.Exe1)
+		// registerWorker("http://fa24-cs425-6802.cs.illinois.edu:4445/register", "count")
+		registerWorker("http://fa24-cs425-6803.cs.illinois.edu:4445/register", op2, &request.Exe2)
+		registerWorker("http://fa24-cs425-6804.cs.illinois.edu:4445/register", op2, &request.Exe2)
+		time.Sleep(50 * time.Millisecond)
+		sendDataStream("fa24-cs425-6802.cs.illinois.edu:5555")
+
+		// Respond to client
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Stream processing completed successfully"))
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func sendDataStream(serverAddress string) error {
+	// Establish a TCP connection to the server
+	conn, err := net.Dial("tcp", serverAddress)
+	if err != nil {
+		return fmt.Errorf("failed to connect to server: %w", err)
+	}
+	defer conn.Close()
+
+	// Loop to send 1000 key-value pairs
+	lines := []string{
+		"This is the first line.",
+		"Here is the second line.",
+		"The third line is here.",
+		"This is line number four.",
+		"Line five comes next.",
+		"Here is line six.",
+		"Now we have line seven.",
+		"This is the eighth line.",
+		"Line nine is right here.",
+		"Finally, the tenth line.",
+	}
+
+	for i, line := range lines {
+		key := fmt.Sprintf("Line%d", i+1)
+		value := line
+		data := fmt.Sprintf("%s, %s\n", key, value)
+
+		// Write the data to the connection
+		_, err := conn.Write([]byte(data))
+		if err != nil {
+			return fmt.Errorf("failed to send data stream: %w", err)
+		}
+		fmt.Printf("Sent: %s", data)
+	}
+
+	return nil
+}
+
+// Helper function to decode base64 and save as a file
+func decodeAndSaveExecutable(encoded, filename string) (string, error) {
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode base64: %v", err)
+	}
+
+	tmpFile, err := os.CreateTemp("", filename)
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %v", err)
+	}
+	defer tmpFile.Close()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		return "", fmt.Errorf("failed to write to temp file: %v", err)
+	}
+
+	if err := os.Chmod(tmpFile.Name(), 0755); err != nil {
+		return "", fmt.Errorf("failed to set executable permissions: %v", err)
+	}
+
+	return tmpFile.Name(), nil
+}
+
+func registerWorker(workerURL string, exe_name string, exe_content *string) {
+
+	encodedExecutable := *exe_content
+
+	// Additional JSON info
+	info := map[string]string{
+		"id":   "0",
+		"name": exe_name,
+	}
+
+	// Create the request payload
+	payload := struct {
+		Executable string            `json:"executable"`
+		Info       map[string]string `json:"info"`
+	}{
+		Executable: encodedExecutable,
+		Info:       info,
+	}
+
+	// Encode payload to JSON
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Printf("Failed to encode payload: %v\n", err)
+		return
+	}
+
+	// Create and send the HTTP POST request
+	resp, err := http.Post(workerURL, "application/json", bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		fmt.Printf("Failed to send request: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Handle the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("Failed to read response: %v\n", err)
+		return
+	}
+
+	// Print response status and body
+	fmt.Printf("Response Status: %s\n", resp.Status)
+	fmt.Printf("Response Body: %s\n", string(body))
 }
 
 func (st *StreamServer) httpHandleRegister(w http.ResponseWriter, r *http.Request) {
@@ -243,14 +427,6 @@ func createTask(name string) Task {
 		childID:  0,
 		exe:      name,
 	}
-}
-
-func StreamProcessing(st *StreamServer) {
-
-	go workerHTTPServer(st)
-	go tcpServer(st)
-
-	select {}
 }
 
 func tcpServer(st *StreamServer) {

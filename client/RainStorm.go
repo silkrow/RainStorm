@@ -5,110 +5,90 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"os"
-	"time"
+	"strconv"
 )
 
-func sendDataStream(serverAddress string) error {
-	// Establish a TCP connection to the server
-	conn, err := net.Dial("tcp", serverAddress)
-	if err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
-	}
-	defer conn.Close()
-
-	// Loop to send 1000 key-value pairs
-	lines := []string{
-		"This is the first line.",
-		"Here is the second line.",
-		"The third line is here.",
-		"This is line number four.",
-		"Line five comes next.",
-		"Here is line six.",
-		"Now we have line seven.",
-		"This is the eighth line.",
-		"Line nine is right here.",
-		"Finally, the tenth line.",
-	}
-
-	for i, line := range lines {
-		key := fmt.Sprintf("Line%d", i+1)
-		value := line
-		data := fmt.Sprintf("%s, %s\n", key, value)
-
-		// Write the data to the connection
-		_, err := conn.Write([]byte(data))
-		if err != nil {
-			return fmt.Errorf("failed to send data stream: %w", err)
-		}
-		fmt.Printf("Sent: %s", data)
-	}
-
-	return nil
-}
+const (
+	EXE_FOLDER = "../test_exe/"
+)
 
 func main() {
-	registerWorker("http://fa24-cs425-6802.cs.illinois.edu:4445/register", "split")
-	// registerWorker("http://fa24-cs425-6802.cs.illinois.edu:4445/register", "count")
-	registerWorker("http://fa24-cs425-6803.cs.illinois.edu:4445/register", "count")
-	registerWorker("http://fa24-cs425-6804.cs.illinois.edu:4445/register", "count")
-	time.Sleep(50 * time.Millisecond)
-	sendDataStream("fa24-cs425-6802.cs.illinois.edu:5555")
-}
 
-func registerWorker(workerURL string, exe_name string) {
-	// Read the binary executable file
-	executablePath := "../test_exe/" + exe_name // Replace with the path to your executable
-	executable, err := os.ReadFile(executablePath)
+	if len(os.Args) != 6 {
+		fmt.Println("Usage: RainStorm op1 op2 f1 f2 num")
+		os.Exit(1)
+	}
+
+	op1 := os.Args[1]
+	op2 := os.Args[2]
+	f1 := os.Args[3]
+	f2 := os.Args[4]
+	num := os.Args[5]
+
+	_, err := strconv.Atoi(num)
+	if err != nil {
+		fmt.Println("Invalid value for 'num': must be an integer")
+		os.Exit(1)
+	}
+
+	// Prepare the request payload
+	info := map[string]string{
+		"op1": op1,
+		"op2": op2,
+		"f1":  f1,
+		"f2":  f2,
+		"num": num,
+	}
+
+	op1_path := EXE_FOLDER + op1
+	exe1, err := os.ReadFile(op1_path)
 	if err != nil {
 		fmt.Printf("Failed to read executable: %v\n", err)
 		return
 	}
+	encoded_exe1 := base64.StdEncoding.EncodeToString(exe1)
 
-	// Base64 encode the executable
-	encodedExecutable := base64.StdEncoding.EncodeToString(executable)
-
-	// Additional JSON info
-	info := map[string]string{
-		"id":   "0",
-		"name": exe_name,
+	op2_path := EXE_FOLDER + op2
+	exe2, err := os.ReadFile(op2_path)
+	if err != nil {
+		fmt.Printf("Failed to read executable: %v\n", err)
+		return
 	}
+	encoded_exe2 := base64.StdEncoding.EncodeToString(exe2)
 
 	// Create the request payload
 	payload := struct {
-		Executable string            `json:"executable"`
-		Info       map[string]string `json:"info"`
+		Exe1 string            `json:"exe1"`
+		Exe2 string            `json:"exe2"`
+		Info map[string]string `json:"info"`
 	}{
-		Executable: encodedExecutable,
-		Info:       info,
+		Exe1: encoded_exe1,
+		Exe2: encoded_exe2,
+		Info: info,
 	}
 
 	// Encode payload to JSON
 	jsonPayload, err := json.Marshal(payload)
+
 	if err != nil {
-		fmt.Printf("Failed to encode payload: %v\n", err)
-		return
+		fmt.Println("Error creating request payload:", err)
+		os.Exit(1)
 	}
 
-	// Create and send the HTTP POST request
-	resp, err := http.Post(workerURL, "application/json", bytes.NewBuffer(jsonPayload))
+	// Send HTTP POST request
+	resp, err := http.Post("http://fa24-cs425-6801.cs.illinois.edu:4445/rainstorm", "application/json", bytes.NewReader(jsonPayload))
 	if err != nil {
-		fmt.Printf("Failed to send request: %v\n", err)
-		return
+		fmt.Println("Error sending request:", err)
+		os.Exit(1)
 	}
 	defer resp.Body.Close()
 
-	// Handle the response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Printf("Failed to read response: %v\n", err)
-		return
+	// Handle response
+	if resp.StatusCode == http.StatusOK {
+		fmt.Println("Stream processing completed successfully")
+	} else {
+		fmt.Printf("Error: %s\n", resp.Status)
 	}
-
-	// Print response status and body
-	fmt.Printf("Response Status: %s\n", resp.Status)
-	fmt.Printf("Response Body: %s\n", string(body))
 }
