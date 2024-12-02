@@ -1,7 +1,7 @@
 package main
 
 import (
-	"HyDFS/failuredetector"
+	"RainStormServer/failuredetector"
 	"fmt"
 	"log"
 	"net/http"
@@ -34,6 +34,9 @@ func main() {
 	defer logFile.Close()
 	log.SetOutput(logFile)
 
+	// Added for debugging (pprof)
+	// Usage: go tool pprof http://localhost:6060/debug/pprof/profile
+
 	go func() {
 		log.Println(http.ListenAndServe("localhost:6060", nil))
 	}()
@@ -53,5 +56,9 @@ func main() {
 	// 2. Maintenance Daemon
 	go Maintenance(fs)
 	// 3. HTTP Request handling
-	HTTPServer(fs)
+	go HTTPServer(fs)
+
+	st := StreamServerInit(vmNumber)
+	// 4. Streaming
+	StreamProcessing(st)
 }

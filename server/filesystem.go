@@ -1,7 +1,7 @@
 package main
 
 import (
-	"HyDFS/failuredetector"
+	"RainStormServer/failuredetector"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"

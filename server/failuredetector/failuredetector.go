@@ -135,7 +135,7 @@ func joinFD(ml *MembershipList, domain string) {
 		if err != nil {
 			feedback := err.Error()
 			if strings.HasPrefix(feedback, "APPROVED") {
-				fmt.Println("Joined!")
+				fmt.Println("Joined failure detection network!")
 				var copyMembership string
 				fmt.Sscanf(feedback, "APPROVED %s", &copyMembership)
 				ml.Parse(copyMembership)
