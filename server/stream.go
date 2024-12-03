@@ -128,7 +128,11 @@ func (st *StreamServer) httpHandleRainStorm(w http.ResponseWriter, r *http.Reque
 		registerWorker("http://fa24-cs425-6803.cs.illinois.edu:4445/register", op2, &request.Exe2)
 		registerWorker("http://fa24-cs425-6804.cs.illinois.edu:4445/register", op2, &request.Exe2)
 		time.Sleep(50 * time.Millisecond)
-		sendDataStream("fa24-cs425-6802.cs.illinois.edu:5555")
+		err = sendDataSource("fa24-cs425-6802.cs.illinois.edu:5555", f1)
+		if err != nil {
+			http.Error(w, "Failed to send source file: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		// Respond to client
 		w.WriteHeader(http.StatusOK)
@@ -139,7 +143,71 @@ func (st *StreamServer) httpHandleRainStorm(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-func sendDataStream(serverAddress string) error {
+func sendDataSource(serverAddress string, filename string) error {
+
+	parts := []string{"get", filename, "local_file.txt"}
+
+	if parts[0] == "get" && len(parts) == 3 {
+		hydfs := parts[1]
+		local := parts[2]
+
+		liveServer := "http://fa24-cs425-6801.cs.illinois.edu:" + HTTP_PORT
+		if liveServer != "" {
+			// Prepare the JSON payload
+			reqData := map[string]string{
+				"local": local,
+				"hydfs": hydfs,
+			}
+			reqBody, err := json.Marshal(reqData)
+			if err != nil {
+				fmt.Println("Error marshalling request data:", err)
+				return err
+			}
+
+			// Create the GET request with a body
+			url := fmt.Sprintf("%s/get", liveServer)
+			req, err := http.NewRequest(http.MethodGet, url, bytes.NewReader(reqBody))
+			if err != nil {
+				fmt.Println("Error creating request:", err)
+				return err
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			// Send the request
+			client := &http.Client{}
+			resp, err := client.Do(req)
+			if err != nil {
+				fmt.Println("Request to server failed:", err)
+				return err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK {
+				// Read the response body
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					fmt.Println("Error reading response body:", err)
+					return err
+				}
+
+				// Write the content to the file
+				filePath := local
+				err = os.WriteFile(filePath, body, 0644)
+				if err != nil {
+					fmt.Println("Error writing to file:", err)
+					return err
+				}
+
+				fmt.Println("File get successfully!")
+			} else {
+				body, _ := io.ReadAll(resp.Body)
+				fmt.Println("Get file failed:", string(body))
+			}
+		} else {
+			fmt.Println("No live servers available")
+		}
+	}
+
 	// Establish a TCP connection to the server
 	conn, err := net.Dial("tcp", serverAddress)
 	if err != nil {
