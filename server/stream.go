@@ -61,13 +61,13 @@ func StreamServerInit(id int) *StreamServer {
 }
 
 func StreamProcessing(st *StreamServer) {
-	go workerHTTPServer(st)
+	go streamHTTPServer(st)
 	go tcpServer(st)
 
 	select {}
 }
 
-func workerHTTPServer(st *StreamServer) {
+func streamHTTPServer(st *StreamServer) {
 	http.HandleFunc("/register", st.httpHandleRegister)
 	http.HandleFunc("/rainstorm", st.httpHandleRainStorm)
 	fmt.Println("Stream server on port " + WORKER_PORT)
@@ -146,100 +146,71 @@ func (st *StreamServer) httpHandleRainStorm(w http.ResponseWriter, r *http.Reque
 func sendDataSource(serverAddress string, filename string) error {
 
 	parts := []string{"get", filename, "local_file.txt"}
+	hydfs := parts[1]
+	local := parts[2]
 
-	if parts[0] == "get" && len(parts) == 3 {
-		hydfs := parts[1]
-		local := parts[2]
-
-		liveServer := "http://fa24-cs425-6801.cs.illinois.edu:" + HTTP_PORT
-		if liveServer != "" {
-			// Prepare the JSON payload
-			reqData := map[string]string{
-				"local": local,
-				"hydfs": hydfs,
-			}
-			reqBody, err := json.Marshal(reqData)
-			if err != nil {
-				fmt.Println("Error marshalling request data:", err)
-				return err
-			}
-
-			// Create the GET request with a body
-			url := fmt.Sprintf("%s/get", liveServer)
-			req, err := http.NewRequest(http.MethodGet, url, bytes.NewReader(reqBody))
-			if err != nil {
-				fmt.Println("Error creating request:", err)
-				return err
-			}
-			req.Header.Set("Content-Type", "application/json")
-
-			// Send the request
-			client := &http.Client{}
-			resp, err := client.Do(req)
-			if err != nil {
-				fmt.Println("Request to server failed:", err)
-				return err
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode == http.StatusOK {
-				// Read the response body
-				body, err := io.ReadAll(resp.Body)
-				if err != nil {
-					fmt.Println("Error reading response body:", err)
-					return err
-				}
-
-				// Write the content to the file
-				filePath := local
-				err = os.WriteFile(filePath, body, 0644)
-				if err != nil {
-					fmt.Println("Error writing to file:", err)
-					return err
-				}
-
-				fmt.Println("File get successfully!")
-			} else {
-				body, _ := io.ReadAll(resp.Body)
-				fmt.Println("Get file failed:", string(body))
-			}
-		} else {
-			fmt.Println("No live servers available")
-		}
+	liveServer := "http://fa24-cs425-6801.cs.illinois.edu:" + HTTP_PORT
+	// Prepare the JSON payload
+	reqData := map[string]string{
+		"local": local,
+		"hydfs": hydfs,
 	}
-
-	// Establish a TCP connection to the server
-	conn, err := net.Dial("tcp", serverAddress)
+	reqBody, err := json.Marshal(reqData)
 	if err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
-	}
-	defer conn.Close()
-
-	// Loop to send 1000 key-value pairs
-	lines := []string{
-		"This is the first line.",
-		"Here is the second line.",
-		"The third line is here.",
-		"This is line number four.",
-		"Line five comes next.",
-		"Here is line six.",
-		"Now we have line seven.",
-		"This is the eighth line.",
-		"Line nine is right here.",
-		"Finally, the tenth line.",
+		fmt.Println("Error marshalling request data:", err)
+		return err
 	}
 
-	for i, line := range lines {
-		key := fmt.Sprintf("Line%d", i+1)
-		value := line
-		data := fmt.Sprintf("%s, %s\n", key, value)
+	// Create the GET request with a body
+	url := fmt.Sprintf("%s/get", liveServer)
+	req, err := http.NewRequest(http.MethodGet, url, bytes.NewReader(reqBody))
+	if err != nil {
+		fmt.Println("Error creating request:", err)
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
 
-		// Write the data to the connection
-		_, err := conn.Write([]byte(data))
+	// Send the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("Request to server failed:", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		// Read the response body
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return fmt.Errorf("failed to send data stream: %w", err)
+			fmt.Println("Error reading response body:", err)
+			return err
 		}
-		fmt.Printf("Sent: %s", data)
+		// Establish a TCP connection to the server
+		conn, err := net.Dial("tcp", serverAddress)
+		if err != nil {
+			return fmt.Errorf("failed to connect to server: %w", err)
+		}
+		defer conn.Close()
+
+		lines := strings.Split(string(body), "\n")
+		for i, line := range lines {
+			key := fmt.Sprintf("Line%d", i+1)
+			value := line
+			data := fmt.Sprintf("%s, %s\n", key, value)
+
+			// Write the data to the connection
+			_, err := conn.Write([]byte(data))
+			if err != nil {
+				return fmt.Errorf("failed to send data stream: %w", err)
+			}
+			fmt.Printf("Sent: %s", data)
+		}
+
+		fmt.Println("File get and file sent successfully!")
+	} else {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Println("Get file failed:", string(body))
 	}
 
 	return nil
