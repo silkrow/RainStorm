@@ -97,11 +97,11 @@ func (r *Receiver) Listen(ml *MembershipList) {
 				var requestAddr string
 				_, err := fmt.Sscanf(message, "REPING from %s to %s", &requestAddr, &targetAddr)
 				if err == nil {
-					log.Printf("Reping Request from %s to ping %s received", requestAddr, targetAddr)
+					// log.Printf("Reping Request from %s to ping %s received", requestAddr, targetAddr)
 					s := NewSender(targetAddr, PingPort, r.myaddress)
 					err = s.Ping(3 * time.Second)
 					if err != nil {
-						log.Printf("Ping to %s failed: %s\n", targetAddr, err)
+						// log.Printf("Ping to %s failed: %s\n", targetAddr, err)
 					} else {
 						conn.WriteToUDP([]byte(fmt.Sprintf("ACK: PING to %s received", targetAddr)), senderAddr)
 					}
@@ -117,11 +117,11 @@ func (r *Receiver) Listen(ml *MembershipList) {
 				var timeStamp string
 				_, err := fmt.Sscanf(message, "GOSSIP from %s passed by %s update %s %s incNum %d timestamp %s", &requestAddr, &passerAddr, &topicAddr, &state, &inc, &timeStamp)
 				if err == nil {
-					log.Printf("Gossip from %s received", passerAddr)
+					// log.Printf("Gossip from %s received", passerAddr)
 					gossipKey := fmt.Sprintf("%s:%s:%s:%s", requestAddr, topicAddr, state, timeStamp)
 					gossipCount := r.gossipBuffer.AddGossip(gossipKey)
 					if gossipCount > 3 {
-						log.Printf("Gossip from %s about %s received %d times, ignoring.", requestAddr, topicAddr, gossipCount)
+						// log.Printf("Gossip from %s about %s received %d times, ignoring.", requestAddr, topicAddr, gossipCount)
 						continue
 					}
 
@@ -212,12 +212,12 @@ func (r *Receiver) Listen(ml *MembershipList) {
 							excludeList = append(excludeList, IntroducerAddr)
 						}
 						gMembers := ml.GetRandomMembers(G, excludeList)
-						log.Printf("Passing on gossip of timestamp %s from %s about %s with: \n", timeStamp, requestAddr, topicAddr)
+						// log.Printf("Passing on gossip of timestamp %s from %s about %s with: \n", timeStamp, requestAddr, topicAddr)
 						for i, gMember := range gMembers {
 							log.Println(i, gMember.IP)
 							gSender := NewSender(gMember.IP, GossipPort, r.myaddress)
 							if err := gSender.Gossip(parsedTime, topicAddr, state, requestAddr, inc); err != nil {
-								log.Printf("Failed to send gossip to %s. With error: %s\n", gMember.IP, err.Error())
+								// log.Printf("Failed to send gossip to %s. With error: %s\n", gMember.IP, err.Error())
 							}
 						}
 					}

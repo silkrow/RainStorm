@@ -2,7 +2,6 @@ package failuredetector
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"time"
 )
@@ -43,16 +42,13 @@ func (s *Sender) Ping(ddl time.Duration) error {
 
 	conn.SetReadDeadline(time.Now().Add(ddl))
 
-	n, _, err := conn.ReadFromUDP(buffer)
+	_, _, err = conn.ReadFromUDP(buffer)
 	if err != nil {
 		if err, ok := err.(net.Error); ok && err.Timeout() {
 			return fmt.Errorf("Ping timed out waiting for response")
 		}
 		return fmt.Errorf("Error reading response: %v", err)
 	}
-
-	response := string(buffer[:n])
-	log.Printf("Received response: %s", response)
 
 	return nil
 }
@@ -79,16 +75,13 @@ func (s *Sender) Reping(ddl time.Duration, repingaddr string) error {
 
 	conn.SetReadDeadline(time.Now().Add(ddl))
 
-	n, _, err := conn.ReadFromUDP(buffer)
+	_, _, err = conn.ReadFromUDP(buffer)
 	if err != nil {
 		if err, ok := err.(net.Error); ok && err.Timeout() {
 			return fmt.Errorf("RePing timed out waiting for response")
 		}
 		return fmt.Errorf("Error reading reping response: %v", err)
 	}
-
-	response := string(buffer[:n])
-	log.Printf("Received response: %s", response)
 
 	return nil
 }

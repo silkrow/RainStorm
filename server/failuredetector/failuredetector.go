@@ -75,12 +75,12 @@ func startFailureDetect(ml *MembershipList, myDomain string) {
 		// Randomly select a member to ping
 		member := ml.RandomMember(myDomain)
 		if member == nil {
-			log.Println("No members available to ping.")
+			// log.Println("No members available to ping.")
 			time.Sleep(FD_period)
 			continue
 		}
 
-		log.Printf("Pinging %s...\n", member.IP)
+		// log.Printf("Pinging %s...\n", member.IP)
 
 		// Create a sender for the selected member
 		s := NewSender(member.IP, PingPort, myDomain)
@@ -110,12 +110,12 @@ func startFailureDetect(ml *MembershipList, myDomain string) {
 
 				gMembers := ml.GetRandomMembers(G, []string{myDomain, member.IP})
 				log.Printf("Gossiping failure/suspect of %s with: \n", member.IP)
-				log.Printf("Failure detection/suspicion of %s at %s\n", member.IP, time.Now())
-				for i, gMember := range gMembers {
-					log.Println(i, gMember.IP)
+				// log.Printf("Failure detection/suspicion of %s at %s\n", member.IP, time.Now())
+				for _, gMember := range gMembers {
+					// log.Println(i, gMember.IP)
 					gSender := NewSender(gMember.IP, GossipPort, myDomain)
 					if err := gSender.Gossip(time.Now(), member.IP, gossipCmd, myDomain, ml.GetIncNumber(member.IP)); err != nil {
-						log.Printf("Failed to send gossip to %s.\n", gMember.IP)
+						// log.Printf("Failed to send gossip to %s.\n", gMember.IP)
 					}
 				}
 			}
