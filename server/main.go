@@ -58,7 +58,7 @@ func main() {
 	// 3. HTTP Request handling
 	go HTTPServer(fs)
 
-	st := StreamServerInit(vmNumber)
+	st := StreamServerInit(vmNumber, ml)
 	// 4. Streaming
 	StreamProcessing(st)
 }

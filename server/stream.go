@@ -1,6 +1,7 @@
 package main
 
 import (
+	"RainStormServer/failuredetector"
 	"bufio"
 	"bytes"
 	"encoding/base64"
@@ -24,13 +25,6 @@ const (
 	TCP_IN_PORT = "5555"
 )
 
-type Task struct {
-	ID       int
-	exe      string
-	parentID int
-	childID  int
-}
-
 type Data struct {
 	ID    int
 	Key   string
@@ -39,13 +33,18 @@ type Data struct {
 
 type StreamServer struct {
 	stype     int
-	locallist []int
-	taskmap   map[int]Task
+	ml        *failuredetector.MembershipList
 	dataQueue chan Data
 	stdinPipe io.WriteCloser
+
+	// Monitoring and dataflow
+	task1_workers []int
+	task2_workers []int
+	emit_table    []int
+	exe_name      string
 }
 
-func StreamServerInit(id int) *StreamServer {
+func StreamServerInit(id int, ml *failuredetector.MembershipList) *StreamServer {
 	var stype int
 	if id == 1 {
 		stype = TYPE_LEADER
@@ -54,8 +53,7 @@ func StreamServerInit(id int) *StreamServer {
 	}
 	return &StreamServer{
 		stype:     stype,
-		locallist: make([]int, 0),
-		taskmap:   make(map[int]Task),
+		ml:        ml,
 		dataQueue: make(chan Data, 10),
 	}
 }
@@ -108,27 +106,31 @@ func (st *StreamServer) httpHandleRainStorm(w http.ResponseWriter, r *http.Reque
 			return
 		}
 
-		// Decode executables
-		op1File, err := decodeAndSaveExecutable(request.Exe1, "op1_executable")
-		if err != nil {
-			http.Error(w, "Failed to process executable op1: "+err.Error(), http.StatusInternalServerError)
+		// Get alive machine IDs
+		aliveIDs := st.ml.Alive_Ids()
+		if len(aliveIDs) < 2*numVal+1 {
+			http.Error(w, "Not enough alive machines to register executables", http.StatusInternalServerError)
 			return
 		}
-		defer os.Remove(op1File) // Clean up temp file
 
-		op2File, err := decodeAndSaveExecutable(request.Exe2, "op2_executable")
-		if err != nil {
-			http.Error(w, "Failed to process executable op2: "+err.Error(), http.StatusInternalServerError)
-			return
+		// Register exe2 on the next lowest 3 IDs
+		task2Machines := aliveIDs[numVal+1 : 2*numVal+1]
+		for _, id := range task2Machines {
+			registerWorker(fmt.Sprintf("http://fa24-cs425-68%02d.cs.illinois.edu:%s/register", id, WORKER_PORT), op2, &request.Exe2, []int{1})
 		}
-		defer os.Remove(op2File) // Clean up temp file
+		st.task2_workers = task2Machines // Store the task2 machines
 
-		registerWorker("http://fa24-cs425-6802.cs.illinois.edu:4445/register", op1, &request.Exe1)
-		// registerWorker("http://fa24-cs425-6802.cs.illinois.edu:4445/register", "count")
-		registerWorker("http://fa24-cs425-6803.cs.illinois.edu:4445/register", op2, &request.Exe2)
-		registerWorker("http://fa24-cs425-6804.cs.illinois.edu:4445/register", op2, &request.Exe2)
+		// Register exe1 on the lowest 3 IDs
+		task1Machines := aliveIDs[1 : numVal+1]
+		for _, id := range task1Machines {
+			registerWorker(fmt.Sprintf("http://fa24-cs425-68%02d.cs.illinois.edu:%s/register", id, WORKER_PORT), op1, &request.Exe1, task2Machines)
+		}
+		st.task1_workers = task1Machines // Store the task1 machines
+
 		time.Sleep(50 * time.Millisecond)
-		err = sendDataSource("fa24-cs425-6802.cs.illinois.edu:5555", f1)
+
+		// Send the partitioned data source
+		err = sendPartitionedDataSource(task1Machines, f1, numVal)
 		if err != nil {
 			http.Error(w, "Failed to send source file: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -141,6 +143,105 @@ func (st *StreamServer) httpHandleRainStorm(w http.ResponseWriter, r *http.Reque
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func sendPartitionedDataSource(servers []int, filename string, numServers int) error {
+
+	parts := []string{"get", filename, "local_file.txt"}
+	hydfs := parts[1]
+	local := parts[2]
+
+	liveServer := "http://fa24-cs425-6801.cs.illinois.edu:" + HTTP_PORT
+	// Prepare the JSON payload
+	reqData := map[string]string{
+		"local": local,
+		"hydfs": hydfs,
+	}
+	reqBody, err := json.Marshal(reqData)
+	if err != nil {
+		fmt.Println("Error marshalling request data:", err)
+		return err
+	}
+
+	// Create the GET request with a body
+	url := fmt.Sprintf("%s/get", liveServer)
+	req, err := http.NewRequest(http.MethodGet, url, bytes.NewReader(reqBody))
+	if err != nil {
+		fmt.Println("Error creating request:", err)
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("Request to server failed:", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Println("Failed to fetch file:", string(body))
+		return fmt.Errorf("failed to fetch file, status: %s", resp.Status)
+	}
+
+	// Read the response body (file content)
+	fileContent, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("Error reading file content:", err)
+		return err
+	}
+
+	// Step 2: Partition the file content for distribution
+	lines := strings.Split(string(fileContent), "\n")
+
+	// Partition the lines evenly
+	partitions := make([][]string, numServers)
+	for i, line := range lines {
+		partitions[i%numServers] = append(partitions[i%numServers], line)
+	}
+
+	// Step 3: Send each partition to the corresponding server
+	for i, serverId := range servers {
+		partitionData := strings.Join(partitions[i], "\n")
+		conn, err := net.Dial("tcp", id_to_domain(serverId)+":"+TCP_IN_PORT)
+		if err != nil {
+			fmt.Printf("Failed to connect to server %s: %v\n", id_to_domain(serverId), err)
+			return err
+		}
+		defer conn.Close()
+
+		// Write the partition data to the server
+		_, err = conn.Write([]byte(partitionData))
+		if err != nil {
+			fmt.Printf("Failed to send data to server %s: %v\n", id_to_domain(serverId), err)
+			return err
+		}
+		fmt.Printf("Sent partition to server %s successfully\n", id_to_domain(serverId))
+	}
+
+	fmt.Println("File partitioning and distribution completed successfully!")
+	return nil
+}
+
+func sendToServer(serverAddress, data string) error {
+	// Establish a TCP connection to the server
+	conn, err := net.Dial("tcp", serverAddress)
+	if err != nil {
+		return fmt.Errorf("failed to connect to server: %w", err)
+	}
+	defer conn.Close()
+
+	// Write the data to the connection
+	_, err = conn.Write([]byte(data))
+	if err != nil {
+		return fmt.Errorf("failed to send data stream: %w", err)
+	}
+
+	log.Printf("Data sent to server %s\n", serverAddress)
+	return nil
 }
 
 func sendDataSource(serverAddress string, filename string) error {
@@ -216,31 +317,7 @@ func sendDataSource(serverAddress string, filename string) error {
 	return nil
 }
 
-// Helper function to decode base64 and save as a file
-func decodeAndSaveExecutable(encoded, filename string) (string, error) {
-	data, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return "", fmt.Errorf("failed to decode base64: %v", err)
-	}
-
-	tmpFile, err := os.CreateTemp("", filename)
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp file: %v", err)
-	}
-	defer tmpFile.Close()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		return "", fmt.Errorf("failed to write to temp file: %v", err)
-	}
-
-	if err := os.Chmod(tmpFile.Name(), 0755); err != nil {
-		return "", fmt.Errorf("failed to set executable permissions: %v", err)
-	}
-
-	return tmpFile.Name(), nil
-}
-
-func registerWorker(workerURL string, exe_name string, exe_content *string) {
+func registerWorker(workerURL string, exe_name string, exe_content *string, emit_table []int) {
 
 	encodedExecutable := *exe_content
 
@@ -254,9 +331,11 @@ func registerWorker(workerURL string, exe_name string, exe_content *string) {
 	payload := struct {
 		Executable string            `json:"executable"`
 		Info       map[string]string `json:"info"`
+		EmitTable  []int             `json:"emit_table"`
 	}{
 		Executable: encodedExecutable,
 		Info:       info,
+		EmitTable:  emit_table, // Add emit_table here
 	}
 
 	// Encode payload to JSON
@@ -292,6 +371,7 @@ func (st *StreamServer) httpHandleRegister(w http.ResponseWriter, r *http.Reques
 		var req struct {
 			Executable string            `json:"executable"` // Changed to string
 			Info       map[string]string `json:"info"`
+			EmitTable  []int             `json:"emit_table"`
 		}
 
 		err := json.NewDecoder(r.Body).Decode(&req)
@@ -319,6 +399,8 @@ func (st *StreamServer) httpHandleRegister(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "Failed to process registration", http.StatusInternalServerError)
 			return
 		}
+
+		st.emit_table = req.EmitTable
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Registration successful"))
@@ -367,7 +449,7 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 		}
 
 		// Redirect output in a separate goroutine
-		go redirectOutput(info["name"], stdout, stderr)
+		go st.redirectOutput(info["name"], stdout, stderr)
 
 		// Wait for the process to complete
 		if err := cmd.Wait(); err != nil {
@@ -379,16 +461,12 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 		st.stdinPipe = nil // Clear the stdinPipe once the process completes
 	}(info["name"])
 
-	// Store the task in the taskmap
-	newTask := createTask(info["name"])
-	st.taskmap[0] = newTask
-
 	return nil
 }
 
 // redirectOutput processes the stdout and stderr of the executable
 // and sends it to another server's TCP based on certain conditions.
-func redirectOutput(exe_name string, stdout, stderr io.ReadCloser) {
+func (st *StreamServer) redirectOutput(exe_name string, stdout, stderr io.ReadCloser) {
 	// Create readers for stdout and stderr
 	stdoutReader := bufio.NewReader(stdout)
 	stderrReader := bufio.NewReader(stderr)
@@ -405,18 +483,10 @@ func redirectOutput(exe_name string, stdout, stderr io.ReadCloser) {
 			}
 
 			fmt.Printf(line)
-			// Process stdout line here (e.g., if check)
-			if strings.Contains(line, "i") {
-				// Send to the first server if the condition is met
-				if exe_name == "split" {
-					sendToTCPServer(line, "fa24-cs425-6803.cs.illinois.edu:5555")
-				}
-			} else {
-				// Send to the second server otherwise
-				if exe_name == "split" {
-					sendToTCPServer(line, "fa24-cs425-6804.cs.illinois.edu:5555")
-				}
-			}
+
+			// Redirect
+			key := strings.SplitN(line, ",", 2)[0]
+			sendToTCPServer(line, id_to_domain(st.emit_table[hashKey(key)%len(st.emit_table)])+":"+TCP_IN_PORT)
 		}
 	}()
 
@@ -456,15 +526,6 @@ func sendToTCPServer(output, serverAddress string) {
 	if err != nil {
 		fmt.Printf("Failed to send message to server: %v\n", err)
 		return
-	}
-}
-
-func createTask(name string) Task {
-	return Task{
-		ID:       0,
-		parentID: 0,
-		childID:  0,
-		exe:      name,
 	}
 }
 
@@ -510,7 +571,7 @@ func (st *StreamServer) handleTCPConnection(conn net.Conn) {
 				fmt.Printf("Failed to write to executable stdin: %v\n", err)
 			}
 		} else {
-			fmt.Printf("No executable running to handle data: %v\n", line)
+			fmt.Printf(line)
 		}
 	}
 }

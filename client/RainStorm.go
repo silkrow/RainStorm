@@ -12,6 +12,8 @@ import (
 
 const (
 	EXE_FOLDER = "../test_exe/"
+	SS_LEADER  = "http://fa24-cs425-6801.cs.illinois.edu"
+	SS_PORT    = "4445"
 )
 
 func main() {
@@ -78,7 +80,7 @@ func main() {
 	}
 
 	// Send HTTP POST request
-	resp, err := http.Post("http://fa24-cs425-6801.cs.illinois.edu:4445/rainstorm", "application/json", bytes.NewReader(jsonPayload))
+	resp, err := http.Post(SS_LEADER+":"+SS_PORT+"/rainstorm", "application/json", bytes.NewReader(jsonPayload))
 	if err != nil {
 		fmt.Println("Error sending request:", err)
 		os.Exit(1)
