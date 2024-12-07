@@ -206,6 +206,7 @@ func sendPartitionedDataSource(servers []int, filename string, numServers int) e
 	// Step 3: Send each partition to the corresponding server
 	for i, serverId := range servers {
 		partitionData := strings.Join(partitions[i], "\n")
+
 		conn, err := net.Dial("tcp", id_to_domain(serverId)+":"+TCP_IN_PORT)
 		if err != nil {
 			fmt.Printf("Failed to connect to server %s: %v\n", id_to_domain(serverId), err)
@@ -214,6 +215,7 @@ func sendPartitionedDataSource(servers []int, filename string, numServers int) e
 		defer conn.Close()
 
 		// Write the partition data to the server
+		partitionData = partitionData + "\n"
 		_, err = conn.Write([]byte(partitionData))
 		if err != nil {
 			fmt.Printf("Failed to send data to server %s: %v\n", id_to_domain(serverId), err)
@@ -223,97 +225,6 @@ func sendPartitionedDataSource(servers []int, filename string, numServers int) e
 	}
 
 	fmt.Println("File partitioning and distribution completed successfully!")
-	return nil
-}
-
-func sendToServer(serverAddress, data string) error {
-	// Establish a TCP connection to the server
-	conn, err := net.Dial("tcp", serverAddress)
-	if err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
-	}
-	defer conn.Close()
-
-	// Write the data to the connection
-	_, err = conn.Write([]byte(data))
-	if err != nil {
-		return fmt.Errorf("failed to send data stream: %w", err)
-	}
-
-	log.Printf("Data sent to server %s\n", serverAddress)
-	return nil
-}
-
-func sendDataSource(serverAddress string, filename string) error {
-
-	parts := []string{"get", filename, "local_file.txt"}
-	hydfs := parts[1]
-	local := parts[2]
-
-	liveServer := "http://fa24-cs425-6801.cs.illinois.edu:" + HTTP_PORT
-	// Prepare the JSON payload
-	reqData := map[string]string{
-		"local": local,
-		"hydfs": hydfs,
-	}
-	reqBody, err := json.Marshal(reqData)
-	if err != nil {
-		fmt.Println("Error marshalling request data:", err)
-		return err
-	}
-
-	// Create the GET request with a body
-	url := fmt.Sprintf("%s/get", liveServer)
-	req, err := http.NewRequest(http.MethodGet, url, bytes.NewReader(reqBody))
-	if err != nil {
-		fmt.Println("Error creating request:", err)
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Send the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Println("Request to server failed:", err)
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
-		// Read the response body
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			fmt.Println("Error reading response body:", err)
-			return err
-		}
-		// Establish a TCP connection to the server
-		conn, err := net.Dial("tcp", serverAddress)
-		if err != nil {
-			return fmt.Errorf("failed to connect to server: %w", err)
-		}
-		defer conn.Close()
-
-		lines := strings.Split(string(body), "\n")
-		for i, line := range lines {
-			key := fmt.Sprintf("Line%d", i+1)
-			value := line
-			data := fmt.Sprintf("%s, %s\n", key, value)
-
-			// Write the data to the connection
-			_, err := conn.Write([]byte(data))
-			if err != nil {
-				return fmt.Errorf("failed to send data stream: %w", err)
-			}
-			fmt.Printf("Sent: %s", data)
-		}
-
-		fmt.Println("File get and file sent successfully!")
-	} else {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Println("Get file failed:", string(body))
-	}
-
 	return nil
 }
 
@@ -552,26 +463,44 @@ func (st *StreamServer) handleTCPConnection(conn net.Conn) {
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
-	for {
-		// Read data from the TCP connection
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err != io.EOF {
-				fmt.Printf("Error reading TCP connection: %v\n", err)
-			}
-			break
-		}
 
-		line = strings.TrimSpace(line)
+	// Create a channel to pass data to stdinPipe
+	dataChannel := make(chan string)
 
-		// Feed data to the running executable
-		if st.stdinPipe != nil {
-			_, err := st.stdinPipe.Write([]byte(fmt.Sprintf("%s\n", line)))
+	// Goroutine to read from the TCP connection
+	go func() {
+		for {
+			// Read data from the TCP connection
+			line, err := reader.ReadString('\n')
 			if err != nil {
-				fmt.Printf("Failed to write to executable stdin: %v\n", err)
+				if err != io.EOF {
+					fmt.Printf("Error reading TCP connection: %v\n", err)
+				}
+				break
 			}
-		} else {
-			fmt.Printf(line)
+
+			line = strings.TrimSpace(line)
+			// Send data to the stdinPipe goroutine via the channel
+			dataChannel <- line
 		}
-	}
+		close(dataChannel) // Close the channel when done reading
+	}()
+
+	// Goroutine to handle feeding data to the stdinPipe
+	go func() {
+		for line := range dataChannel {
+			if st.stdinPipe != nil {
+				_, err := st.stdinPipe.Write([]byte(fmt.Sprintf("%s\n", line)))
+				if err != nil {
+					fmt.Printf("Failed to write to executable stdin: %v\n", err)
+				}
+			} else {
+				// Handle case where stdinPipe is nil (optional)
+				fmt.Printf(line)
+			}
+		}
+	}()
+
+	// This will let the main function exit when the goroutines are done
+	select {}
 }
