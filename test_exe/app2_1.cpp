@@ -23,15 +23,15 @@ int main() {
         }
 
         // Ensure the line has enough fields
-        if (fields.size() < 18) {
-            continue; // Skip lines with insufficient fields
-        }
+        // if (fields.size() < 18) {
+        //     continue; // Skip lines with insufficient fields
+        // }
 
         // Check if the 'Sign_Post' matches the parameter X
-        const std::string& sign_post = fields[7];
+        const std::string& sign_post = fields[6];
         if (sign_post == SIGN_POST_TYPE_X) {
             // Increment the count for the corresponding 'Category'
-            const std::string& category = fields[9];
+            const std::string& category = fields[8];
 
             // Print the updated count for this category
             std::cout << category << " " << 1 << std::endl;
