@@ -581,8 +581,6 @@ func writeDest(st *StreamServer) {
 						body, _ := io.ReadAll(uploadResponse.Body)
 						log.Printf("File upload failed: %s\n", body)
 					}
-
-					log.Println("now " + time.Now().String() + " " + "timestamp " + st.start_ts.Format(time.RFC3339) + " " + string(b))
 				} else {
 					body, _ := io.ReadAll(authResponse.Body)
 					log.Printf("Authorization failed: %s\n", body)
