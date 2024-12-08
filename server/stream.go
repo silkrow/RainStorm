@@ -21,6 +21,7 @@ import (
 const (
 	TYPE_LEADER = 0
 	TYPE_WORKER = 1
+	RESULT_TIME = 30
 	WORKER_PORT = "4445"
 	TCP_IN_PORT = "5555"
 )
@@ -36,12 +37,15 @@ type StreamServer struct {
 	ml        *failuredetector.MembershipList
 	dataQueue chan Data
 	stdinPipe io.WriteCloser
+	destFile  string
 
 	// Monitoring and dataflow
 	task1_workers []int
 	task2_workers []int
 	emit_table    []int
 	exe_name      string
+	buffile       *os.File
+	start_ts      time.Time
 }
 
 func StreamServerInit(id int, ml *failuredetector.MembershipList) *StreamServer {
@@ -55,12 +59,19 @@ func StreamServerInit(id int, ml *failuredetector.MembershipList) *StreamServer 
 		stype:     stype,
 		ml:        ml,
 		dataQueue: make(chan Data, 10),
+		destFile:  "",
 	}
 }
 
 func StreamProcessing(st *StreamServer) {
+	st.buffile, _ = os.OpenFile("tmp.txt", os.O_TRUNC|os.O_APPEND|os.O_RDWR|os.O_CREATE, 0644)
+	os.Truncate("tmp.txt", 0)
+	defer st.buffile.Close()
 	go streamHTTPServer(st)
 	go tcpServer(st)
+	if st.stype == TYPE_LEADER {
+		go writeDest(st)
+	}
 
 	select {}
 }
@@ -106,6 +117,8 @@ func (st *StreamServer) httpHandleRainStorm(w http.ResponseWriter, r *http.Reque
 			return
 		}
 
+		st.destFile = f2
+
 		// Get alive machine IDs
 		aliveIDs := st.ml.Alive_Ids()
 		if len(aliveIDs) < 2*numVal+1 {
@@ -135,6 +148,8 @@ func (st *StreamServer) httpHandleRainStorm(w http.ResponseWriter, r *http.Reque
 			http.Error(w, "Failed to send source file: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		st.start_ts = time.Now()
 
 		// Respond to client
 		w.WriteHeader(http.StatusOK)
@@ -339,6 +354,7 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 			return
 		}
 		st.stdinPipe = stdin
+		defer st.stdinPipe.Close()
 
 		// Set up output from the process
 		stdout, err := cmd.StdoutPipe()
@@ -495,12 +511,85 @@ func (st *StreamServer) handleTCPConnection(conn net.Conn) {
 					fmt.Printf("Failed to write to executable stdin: %v\n", err)
 				}
 			} else {
-				// Handle case where stdinPipe is nil (optional)
-				fmt.Printf(line)
+				if st.stype == TYPE_LEADER {
+
+					// Write the received content to the file
+					_, err := st.buffile.WriteString(fmt.Sprintf("%s\n", line))
+					if err != nil {
+						log.Println("Failed to write content to file")
+						return
+					}
+				}
 			}
 		}
 	}()
 
 	// This will let the main function exit when the goroutines are done
 	select {}
+}
+
+func writeDest(st *StreamServer) {
+	for {
+		time.Sleep(50 * time.Millisecond)
+		if st.destFile == "" {
+			continue
+		}
+		if st.start_ts.IsZero() {
+			continue
+		} else {
+			if time.Now().After(st.start_ts.Add(RESULT_TIME * time.Second)) {
+				_, err := st.buffile.Seek(0, 0)
+				if err != nil {
+					log.Println("Moving File Pointer failed:", err)
+					return
+				}
+
+				b, err := io.ReadAll(st.buffile)
+				if err != nil {
+					log.Println("Reading File failed:", err)
+					return
+				}
+
+				liveServer := "http://" + id_to_domain(1) + ":" + HTTP_PORT
+
+				// Step 1: Request authorization to create the file
+				data := fmt.Sprintf(`{"local":"%s","hydfs":"%s"}`, "emptyFile", st.destFile)
+				authResponse, err := http.Post(liveServer+"/create", "application/json", bytes.NewBuffer([]byte(data)))
+				if err != nil {
+					log.Println("Request to server failed:", err)
+					return
+				}
+				defer authResponse.Body.Close()
+
+				if authResponse.StatusCode == http.StatusOK {
+
+					req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/create?filename=%s", liveServer, st.destFile), bytes.NewReader(b))
+					if err != nil {
+						log.Println("Failed to create request:", err)
+						return
+					}
+
+					client := &http.Client{}
+					uploadResponse, err := client.Do(req)
+					if err != nil {
+						log.Println("File upload failed:", err)
+						return
+					}
+					defer uploadResponse.Body.Close()
+
+					if uploadResponse.StatusCode != http.StatusOK {
+						body, _ := io.ReadAll(uploadResponse.Body)
+						log.Printf("File upload failed: %s\n", body)
+					}
+
+					log.Println("now " + time.Now().String() + " " + "timestamp " + st.start_ts.Format(time.RFC3339) + " " + string(b))
+				} else {
+					body, _ := io.ReadAll(authResponse.Body)
+					log.Printf("Authorization failed: %s\n", body)
+					return
+				}
+				return
+			}
+		}
+	}
 }
