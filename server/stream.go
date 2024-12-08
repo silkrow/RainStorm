@@ -38,14 +38,21 @@ type StreamServer struct {
 	dataQueue chan Data
 	stdinPipe io.WriteCloser
 	destFile  string
+	srcFile   string
 
 	// Monitoring and dataflow
 	task1_workers []int
 	task2_workers []int
 	emit_table    []int
-	exe_name      string
+	exe1          string
+	exe2          string
+	exe           string
 	buffile       *os.File
 	start_ts      time.Time
+	member_num    int
+	exe_shutdown  chan struct{}
+	start_flag    bool
+	numVal        int
 }
 
 func StreamServerInit(id int, ml *failuredetector.MembershipList) *StreamServer {
@@ -56,10 +63,18 @@ func StreamServerInit(id int, ml *failuredetector.MembershipList) *StreamServer 
 		stype = TYPE_WORKER
 	}
 	return &StreamServer{
-		stype:     stype,
-		ml:        ml,
-		dataQueue: make(chan Data, 10),
-		destFile:  "",
+		stype:        stype,
+		ml:           ml,
+		dataQueue:    make(chan Data, 10),
+		destFile:     "",
+		srcFile:      "",
+		exe1:         "",
+		exe2:         "",
+		exe:          "",
+		exe_shutdown: make(chan struct{}),
+		member_num:   0,
+		start_flag:   false,
+		numVal:       0,
 	}
 }
 
@@ -69,7 +84,9 @@ func StreamProcessing(st *StreamServer) {
 	defer st.buffile.Close()
 	go streamHTTPServer(st)
 	go tcpServer(st)
+
 	if st.stype == TYPE_LEADER {
+		go fd(st)
 		go writeDest(st)
 	}
 
@@ -79,6 +96,7 @@ func StreamProcessing(st *StreamServer) {
 func streamHTTPServer(st *StreamServer) {
 	http.HandleFunc("/register", st.httpHandleRegister)
 	http.HandleFunc("/rainstorm", st.httpHandleRainStorm)
+	http.HandleFunc("/shutdown", st.httpHandleShutdown)
 	fmt.Println("Stream server on port " + WORKER_PORT)
 	log.Fatal(http.ListenAndServe(":"+WORKER_PORT, nil))
 }
@@ -116,40 +134,75 @@ func (st *StreamServer) httpHandleRainStorm(w http.ResponseWriter, r *http.Reque
 			http.Error(w, "Invalid value for 'num'", http.StatusBadRequest)
 			return
 		}
+		st.numVal = numVal
 
-		st.destFile = f2
-
-		// Get alive machine IDs
-		aliveIDs := st.ml.Alive_Ids()
-		if len(aliveIDs) < 2*numVal+1 {
-			http.Error(w, "Not enough alive machines to register executables", http.StatusInternalServerError)
+		// Write executables to files
+		if err := os.WriteFile(op1, []byte(request.Exe1), 0644); err != nil {
+			http.Error(w, "Failed to write to Exe1 file: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Register exe2 on the next lowest 3 IDs
-		task2Machines := aliveIDs[numVal+1 : 2*numVal+1]
-		for _, id := range task2Machines {
-			registerWorker(fmt.Sprintf("http://fa24-cs425-68%02d.cs.illinois.edu:%s/register", id, WORKER_PORT), op2, &request.Exe2, []int{1})
-		}
-		st.task2_workers = task2Machines // Store the task2 machines
-
-		// Register exe1 on the lowest 3 IDs
-		task1Machines := aliveIDs[1 : numVal+1]
-		for _, id := range task1Machines {
-			registerWorker(fmt.Sprintf("http://fa24-cs425-68%02d.cs.illinois.edu:%s/register", id, WORKER_PORT), op1, &request.Exe1, task2Machines)
-		}
-		st.task1_workers = task1Machines // Store the task1 machines
-
-		time.Sleep(50 * time.Millisecond)
-
-		// Send the partitioned data source
-		err = sendPartitionedDataSource(task1Machines, f1, numVal)
-		if err != nil {
-			http.Error(w, "Failed to send source file: "+err.Error(), http.StatusInternalServerError)
+		if err := os.WriteFile(op2, []byte(request.Exe2), 0644); err != nil {
+			http.Error(w, "Failed to write to Exe2 file: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		st.start_ts = time.Now()
+		if st.distribute(f1, f2, op1, op2) {
+
+			// Respond to client
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Stream processing completed successfully"))
+		}
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (st *StreamServer) distribute(f1 string, f2 string, op1 string, op2 string) bool {
+	// Get alive machine IDs
+	aliveIDs := st.ml.Alive_Ids()
+	if len(aliveIDs) < 2*st.numVal+1 {
+		return false
+	}
+
+	// Register exe2 on the next lowest 3 IDs
+	task2Machines := aliveIDs[st.numVal+1 : 2*st.numVal+1]
+	for _, id := range task2Machines {
+		registerWorker(fmt.Sprintf("http://fa24-cs425-68%02d.cs.illinois.edu:%s/register", id, WORKER_PORT), op2, []int{1})
+	}
+	st.task2_workers = task2Machines // Store the task2 machines
+
+	// Register exe1 on the lowest 3 IDs
+	task1Machines := aliveIDs[1 : st.numVal+1]
+	for _, id := range task1Machines {
+		registerWorker(fmt.Sprintf("http://fa24-cs425-68%02d.cs.illinois.edu:%s/register", id, WORKER_PORT), op1, task2Machines)
+	}
+	st.task1_workers = task1Machines // Store the task1 machines
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Send the partitioned data source
+	err := sendPartitionedDataSource(task1Machines, f1, st.numVal)
+	if err != nil {
+		return false
+	}
+	st.exe1 = op1
+	st.exe2 = op2
+	st.start_ts = time.Now()
+	st.start_flag = true
+	st.srcFile = f1
+	st.destFile = f2
+
+	return true
+}
+
+func (st *StreamServer) httpHandleShutdown(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if st.exe != "" {
+			close(st.exe_shutdown)
+		}
 
 		// Respond to client
 		w.WriteHeader(http.StatusOK)
@@ -243,9 +296,10 @@ func sendPartitionedDataSource(servers []int, filename string, numServers int) e
 	return nil
 }
 
-func registerWorker(workerURL string, exe_name string, exe_content *string, emit_table []int) {
+func registerWorker(workerURL string, exe_name string, emit_table []int) {
+	exe_content, err := os.ReadFile(exe_name)
 
-	encodedExecutable := *exe_content
+	encodedExecutable := string(exe_content)
 
 	// Additional JSON info
 	info := map[string]string{
@@ -339,6 +393,7 @@ func (st *StreamServer) httpHandleRegister(w http.ResponseWriter, r *http.Reques
 func (st *StreamServer) processRegistration(executable []byte, info map[string]string) error {
 	// Save the executable to a file
 	err := os.WriteFile(info["name"], executable, 0700)
+	st.exe = info["name"]
 	if err != nil {
 		return fmt.Errorf("failed to save executable: %w", err)
 	}
@@ -354,7 +409,10 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 			return
 		}
 		st.stdinPipe = stdin
-		defer st.stdinPipe.Close()
+		defer func() {
+			st.stdinPipe.Close()
+			st.stdinPipe = nil
+		}()
 
 		// Set up output from the process
 		stdout, err := cmd.StdoutPipe()
@@ -378,14 +436,25 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 		// Redirect output in a separate goroutine
 		go st.redirectOutput(info["name"], stdout, stderr)
 
-		// Wait for the process to complete
-		if err := cmd.Wait(); err != nil {
-			fmt.Printf("Executable finished with error: %v\n", err)
-		} else {
-			fmt.Printf("Executable finished successfully.\n")
-		}
+		// Wait for either process completion or shutdown signal
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
 
-		st.stdinPipe = nil // Clear the stdinPipe once the process completes
+		select {
+		case <-st.exe_shutdown: // Received shutdown signal
+			fmt.Println("Shutdown signal received. Terminating process...")
+			if err := cmd.Process.Kill(); err != nil {
+				fmt.Printf("Failed to kill process: %v\n", err)
+			}
+		case err := <-done: // Process completed
+			if err != nil {
+				fmt.Printf("Executable finished with error: %v\n", err)
+			} else {
+				fmt.Printf("Executable finished successfully.\n")
+			}
+		}
 	}(info["name"])
 
 	return nil
@@ -534,7 +603,7 @@ func writeDest(st *StreamServer) {
 		if st.destFile == "" {
 			continue
 		}
-		if st.start_ts.IsZero() {
+		if !st.start_flag || st.start_ts.IsZero() {
 			continue
 		} else {
 			if time.Now().After(st.start_ts.Add(RESULT_TIME * time.Second)) {
@@ -588,6 +657,44 @@ func writeDest(st *StreamServer) {
 				}
 				return
 			}
+		}
+	}
+}
+
+func fd(st *StreamServer) {
+	for {
+		time.Sleep(time.Second)
+		alive_ids := st.ml.Alive_Ids()
+		new_num := len(alive_ids)
+		if new_num < st.member_num {
+			fmt.Println("Fault tolerant processing... ", new_num, " machines left.")
+			st.start_flag = false
+			st.member_num = new_num
+			for _, i := range st.task1_workers {
+				req, err := http.NewRequest(http.MethodGet, "http://"+id_to_domain(i)+":"+WORKER_PORT+"/shutdown", nil)
+				if err != nil {
+					log.Println("Failed to create request:", err)
+					continue
+				}
+
+				client := &http.Client{}
+				client.Do(req)
+			}
+			for _, i := range st.task2_workers {
+				req, err := http.NewRequest(http.MethodGet, "http://"+id_to_domain(i)+":"+WORKER_PORT+"/shutdown", nil)
+				if err != nil {
+					log.Println("Failed to create request:", err)
+					continue
+				}
+
+				client := &http.Client{}
+				client.Do(req)
+			}
+
+			st.distribute(st.srcFile, st.destFile, st.exe1, st.exe2)
+
+		} else if new_num > st.member_num {
+			st.member_num = new_num
 		}
 	}
 }

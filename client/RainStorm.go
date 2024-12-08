@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -91,6 +92,13 @@ func main() {
 	if resp.StatusCode == http.StatusOK {
 		fmt.Println("Stream processing completed successfully")
 	} else {
-		fmt.Printf("Error: %s\n", resp.Status)
+		// Read the response body
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			fmt.Printf("Error reading response body: %v\n", readErr)
+		} else {
+			fmt.Printf("Error: %s\n", resp.Status)
+			fmt.Printf("Response body: %s\n", string(body))
+		}
 	}
 }
