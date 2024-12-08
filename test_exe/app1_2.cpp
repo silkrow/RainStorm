@@ -5,7 +5,6 @@
 #include <vector>
 
 int main() {
-    const std::regex PATTERN_X("a"); // Replace with your actual regex pattern
     std::string line;
 
     while (std::getline(std::cin, line)) {

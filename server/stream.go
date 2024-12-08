@@ -200,6 +200,7 @@ func (st *StreamServer) distribute(f1 string, f2 string, op1 string, op2 string)
 func (st *StreamServer) httpHandleShutdown(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		log.Println(time.Now().Format(time.RFC3339 + "Shutdown command received"))
 		if st.exe != "" {
 			close(st.exe_shutdown)
 		}
@@ -356,19 +357,24 @@ func (st *StreamServer) httpHandleRegister(w http.ResponseWriter, r *http.Reques
 
 		err := json.NewDecoder(r.Body).Decode(&req)
 		if err != nil {
+			log.Println(time.Now().Format(time.RFC3339) + "Registration failed1 for " + req.Executable)
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
 
+		log.Println(time.Now().Format(time.RFC3339 + "Registeration command received for " + req.Executable))
+
 		// Decode Base64-encoded executable
 		executable, err := base64.StdEncoding.DecodeString(req.Executable)
 		if err != nil {
+			log.Println(time.Now().Format(time.RFC3339) + "Registration failed2 for " + req.Executable)
 			http.Error(w, "Invalid Base64 encoding in executable", http.StatusBadRequest)
 			return
 		}
 
 		// Validate required fields
 		if len(executable) == 0 || req.Info == nil {
+			log.Println(time.Now().Format(time.RFC3339) + "Registration failed3 for " + req.Executable)
 			http.Error(w, "Missing required fields", http.StatusBadRequest)
 			return
 		}
@@ -376,6 +382,7 @@ func (st *StreamServer) httpHandleRegister(w http.ResponseWriter, r *http.Reques
 		// Handle the received executable and JSON info
 		err = st.processRegistration(executable, req.Info)
 		if err != nil {
+			log.Println(time.Now().Format(time.RFC3339) + "Registration failed4 for " + req.Executable)
 			http.Error(w, "Failed to process registration", http.StatusInternalServerError)
 			return
 		}
@@ -667,31 +674,34 @@ func fd(st *StreamServer) {
 		alive_ids := st.ml.Alive_Ids()
 		new_num := len(alive_ids)
 		if new_num < st.member_num {
-			fmt.Println("Fault tolerant processing... ", new_num, " machines left.")
-			st.start_flag = false
 			st.member_num = new_num
-			for _, i := range st.task1_workers {
-				req, err := http.NewRequest(http.MethodGet, "http://"+id_to_domain(i)+":"+WORKER_PORT+"/shutdown", nil)
-				if err != nil {
-					log.Println("Failed to create request:", err)
-					continue
+			if st.start_flag {
+				fmt.Println("Fault tolerant processing... ", new_num, " machines left.")
+				st.start_flag = false
+
+				for _, i := range st.task1_workers {
+					req, err := http.NewRequest(http.MethodGet, "http://"+id_to_domain(i)+":"+WORKER_PORT+"/shutdown", nil)
+					if err != nil {
+						log.Println("Failed to create request:", err)
+						continue
+					}
+
+					client := &http.Client{}
+					client.Do(req)
+				}
+				for _, i := range st.task2_workers {
+					req, err := http.NewRequest(http.MethodGet, "http://"+id_to_domain(i)+":"+WORKER_PORT+"/shutdown", nil)
+					if err != nil {
+						log.Println("Failed to create request:", err)
+						continue
+					}
+
+					client := &http.Client{}
+					client.Do(req)
 				}
 
-				client := &http.Client{}
-				client.Do(req)
+				st.distribute(st.srcFile, st.destFile, st.exe1, st.exe2)
 			}
-			for _, i := range st.task2_workers {
-				req, err := http.NewRequest(http.MethodGet, "http://"+id_to_domain(i)+":"+WORKER_PORT+"/shutdown", nil)
-				if err != nil {
-					log.Println("Failed to create request:", err)
-					continue
-				}
-
-				client := &http.Client{}
-				client.Do(req)
-			}
-
-			st.distribute(st.srcFile, st.destFile, st.exe1, st.exe2)
 
 		} else if new_num > st.member_num {
 			st.member_num = new_num
