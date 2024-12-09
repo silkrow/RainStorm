@@ -242,7 +242,7 @@ func Maintenance(fs *FileServer) {
 				resp, err := client.Do(req)
 
 				if err != nil {
-					log.Println("Error in sending request of online check", err)
+					// log.Println("Error in sending request of online check", err)
 					continue
 				}
 				defer resp.Body.Close()

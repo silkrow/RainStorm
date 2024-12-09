@@ -21,7 +21,7 @@ import (
 const (
 	TYPE_LEADER = 0
 	TYPE_WORKER = 1
-	RESULT_TIME = 30
+	RESULT_TIME = 60
 	WORKER_PORT = "4445"
 	TCP_IN_PORT = "5555"
 )
@@ -54,6 +54,7 @@ type StreamServer struct {
 	exe_shutdown  chan struct{}
 	start_flag    bool
 	numVal        int
+	version       int
 }
 
 func StreamServerInit(id int, ml *failuredetector.MembershipList) *StreamServer {
@@ -76,6 +77,7 @@ func StreamServerInit(id int, ml *failuredetector.MembershipList) *StreamServer 
 		member_num:   0,
 		start_flag:   false,
 		numVal:       0,
+		version:      0,
 	}
 }
 
@@ -170,14 +172,14 @@ func (st *StreamServer) distribute(f1 string, f2 string, op1 string, op2 string)
 	// Register exe2 on the next lowest 3 IDs
 	task2Machines := aliveIDs[st.numVal+1 : 2*st.numVal+1]
 	for _, id := range task2Machines {
-		registerWorker(fmt.Sprintf("http://fa24-cs425-68%02d.cs.illinois.edu:%s/register", id, WORKER_PORT), op2, []int{1})
+		registerWorker(st, fmt.Sprintf("http://fa24-cs425-68%02d.cs.illinois.edu:%s/register", id, WORKER_PORT), op2, []int{1})
 	}
 	st.task2_workers = task2Machines // Store the task2 machines
 
 	// Register exe1 on the lowest 3 IDs
 	task1Machines := aliveIDs[1 : st.numVal+1]
 	for _, id := range task1Machines {
-		registerWorker(fmt.Sprintf("http://fa24-cs425-68%02d.cs.illinois.edu:%s/register", id, WORKER_PORT), op1, task2Machines)
+		registerWorker(st, fmt.Sprintf("http://fa24-cs425-68%02d.cs.illinois.edu:%s/register", id, WORKER_PORT), op1, task2Machines)
 	}
 	st.task1_workers = task1Machines // Store the task1 machines
 
@@ -191,7 +193,7 @@ func (st *StreamServer) distribute(f1 string, f2 string, op1 string, op2 string)
 	st.exe1 = op1
 	st.exe2 = op2
 	st.start_ts = time.Now()
-	fmt.Println("Changed start_ts to" + st.start_ts.String())
+	log.Println("Changed start_ts to" + st.start_ts.String())
 	st.start_flag = true
 	st.srcFile = f1
 	st.destFile = f2
@@ -290,24 +292,24 @@ func sendPartitionedDataSource(servers []int, filename string, numServers int) e
 		partitionData = partitionData + "\n"
 		_, err = conn.Write([]byte(partitionData))
 		if err != nil {
-			fmt.Printf("Failed to send data to server %s: %v\n", id_to_domain(serverId), err)
+			log.Printf("Failed to send data to server %s: %v\n", id_to_domain(serverId), err)
 			return err
 		}
-		fmt.Printf("Sent partition to server %s successfully\n", id_to_domain(serverId))
+		log.Printf("Sent partition to server %s successfully\n", id_to_domain(serverId))
 	}
 
-	fmt.Println("File partitioning and distribution completed successfully!")
+	log.Println("File partitioning and distribution completed successfully!")
 	return nil
 }
 
-func registerWorker(workerURL string, exe_name string, emit_table []int) {
+func registerWorker(st *StreamServer, workerURL string, exe_name string, emit_table []int) {
 	exe_content, err := os.ReadFile(exe_name)
 
 	encodedExecutable := string(exe_content)
 
 	// Additional JSON info
 	info := map[string]string{
-		"id":   "0",
+		"id":   strconv.Itoa(st.version),
 		"name": exe_name,
 	}
 
@@ -338,15 +340,12 @@ func registerWorker(workerURL string, exe_name string, emit_table []int) {
 	defer resp.Body.Close()
 
 	// Handle the response
-	body, err := io.ReadAll(resp.Body)
+	_, err = io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Printf("Failed to read response: %v\n", err)
 		return
 	}
 
-	// Print response status and body
-	fmt.Printf("Response Status: %s\n", resp.Status)
-	fmt.Printf("Response Body: %s\n", string(body))
 }
 
 func (st *StreamServer) httpHandleRegister(w http.ResponseWriter, r *http.Request) {
@@ -391,6 +390,7 @@ func (st *StreamServer) httpHandleRegister(w http.ResponseWriter, r *http.Reques
 		}
 
 		st.emit_table = req.EmitTable
+		st.version, _ = strconv.Atoi(req.Info["id"])
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Registration successful"))
@@ -464,7 +464,7 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 			return
 		case err := <-done: // Process completed
 			if err != nil {
-				fmt.Printf("Executable finished with error: %v\n", err)
+				// fmt.Printf("Executable finished with error: %v\n", err)
 			} else {
 				fmt.Printf("Executable finished successfully.\n")
 			}
@@ -487,21 +487,20 @@ func (st *StreamServer) redirectOutput(exe_name string, stdout io.ReadCloser) {
 		for {
 			select {
 			case <-st.exe_shutdown:
-				fmt.Println(time.Now(), "Received stop signal. Exiting redirectoutput loop.")
 				return
 			default:
 				line, err := stdoutReader.ReadString('\n')
 				if err != nil {
 					if err != io.EOF {
-						fmt.Printf("Error reading stdout: %v\n", err)
+						// fmt.Printf("Error reading stdout: %v\n", err)
 					}
-					break
+					return
 				}
-
-				log.Printf(line)
 
 				// Redirect
 				key := strings.SplitN(line, ",", 2)[0]
+				line = strconv.Itoa(st.version) + " " + line
+				log.Printf(line)
 				sendToTCPServer(line, id_to_domain(st.emit_table[hashKey(key)%len(st.emit_table)])+":"+TCP_IN_PORT)
 			}
 		}
@@ -516,7 +515,7 @@ func sendToTCPServer(output, serverAddress string) {
 	// Establish a connection to the server
 	conn, err := net.Dial("tcp", serverAddress)
 	if err != nil {
-		fmt.Printf("Failed to connect to server %s: %v\n", serverAddress, err)
+		log.Printf("Failed to connect to server %s: %v\n", serverAddress, err)
 		return
 	}
 	defer conn.Close()
@@ -579,18 +578,34 @@ func (st *StreamServer) handleTCPConnection(conn net.Conn) {
 	go func() {
 		for line := range dataChannel {
 			if st.stdinPipe != nil {
+				if st.exe[len(st.exe)-1] == '2' {
+					lines := strings.Split(line, " ")
+					// version, _ := strconv.Atoi(lines[0])
+					line = line[len(lines[0])+1:]
+				}
 				_, err := st.stdinPipe.Write([]byte(fmt.Sprintf("%s\n", line)))
 				if err != nil {
-					fmt.Printf("Failed to write to executable stdin: %v\n", err)
+					// fmt.Printf("Failed to write to executable stdin: %v\n", err)
+					return
 				}
 			} else {
 				if st.stype == TYPE_LEADER {
 
-					// Write the received content to the file
-					_, err := st.buffile.WriteString(fmt.Sprintf("%s %s %s\n", time.Now().Format(time.RFC3339), conn.RemoteAddr(), line))
-					if err != nil {
-						log.Println("Failed to write content to file")
-						return
+					lines := strings.Split(line, " ")
+					version, _ := strconv.Atoi(lines[0])
+					line = line[len(lines[0])+1:]
+
+					if version == st.version {
+
+						fmt.Printf("%s\n", line)
+						// Write the received content to the file
+						_, err := st.buffile.WriteString(fmt.Sprintf("%s\n", line))
+						if err != nil {
+							log.Println("Failed to write content to file")
+							return
+						}
+					} else {
+						continue
 					}
 				}
 			}
@@ -672,8 +687,9 @@ func fd(st *StreamServer) {
 		new_num := len(alive_ids)
 		if new_num < st.member_num {
 			st.member_num = new_num
+			st.version += 1
 			if st.start_flag {
-				fmt.Println("Fault tolerant processing... ", new_num, " machines left.")
+				log.Println("Fault tolerant processing... ", new_num, " machines left.")
 				st.start_flag = false
 
 				for _, i := range st.task1_workers {
@@ -698,7 +714,6 @@ func fd(st *StreamServer) {
 				}
 				time.Sleep(3 * time.Second)
 				os.Truncate("tmp.txt", 0)
-
 				st.distribute(st.srcFile, st.destFile, st.exe1, st.exe2)
 			}
 
