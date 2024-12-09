@@ -33,12 +33,13 @@ type Data struct {
 }
 
 type StreamServer struct {
-	stype     int
-	ml        *failuredetector.MembershipList
-	dataQueue chan Data
-	stdinPipe io.WriteCloser
-	destFile  string
-	srcFile   string
+	stype      int
+	ml         *failuredetector.MembershipList
+	dataQueue  chan Data
+	stdinPipe  io.WriteCloser
+	stdoutPipe io.ReadCloser
+	destFile   string
+	srcFile    string
 
 	// Monitoring and dataflow
 	task1_workers []int
@@ -190,6 +191,7 @@ func (st *StreamServer) distribute(f1 string, f2 string, op1 string, op2 string)
 	st.exe1 = op1
 	st.exe2 = op2
 	st.start_ts = time.Now()
+	fmt.Println("Changed start_ts to" + st.start_ts.String())
 	st.start_flag = true
 	st.srcFile = f1
 	st.destFile = f2
@@ -357,24 +359,24 @@ func (st *StreamServer) httpHandleRegister(w http.ResponseWriter, r *http.Reques
 
 		err := json.NewDecoder(r.Body).Decode(&req)
 		if err != nil {
-			log.Println(time.Now().Format(time.RFC3339) + "Registration failed1 for " + req.Executable)
+			log.Println(time.Now().Format(time.RFC3339) + "Registration failed1 for " + req.Info["name"])
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
 
-		log.Println(time.Now().Format(time.RFC3339 + "Registeration command received for " + req.Executable))
+		log.Println(time.Now().Format(time.RFC3339 + "Registeration command received for " + req.Info["name"]))
 
 		// Decode Base64-encoded executable
 		executable, err := base64.StdEncoding.DecodeString(req.Executable)
 		if err != nil {
-			log.Println(time.Now().Format(time.RFC3339) + "Registration failed2 for " + req.Executable)
+			log.Println(time.Now().Format(time.RFC3339) + "Registration failed2 for " + req.Info["name"])
 			http.Error(w, "Invalid Base64 encoding in executable", http.StatusBadRequest)
 			return
 		}
 
 		// Validate required fields
 		if len(executable) == 0 || req.Info == nil {
-			log.Println(time.Now().Format(time.RFC3339) + "Registration failed3 for " + req.Executable)
+			log.Println(time.Now().Format(time.RFC3339) + "Registration failed3 for " + req.Info["name"])
 			http.Error(w, "Missing required fields", http.StatusBadRequest)
 			return
 		}
@@ -382,7 +384,7 @@ func (st *StreamServer) httpHandleRegister(w http.ResponseWriter, r *http.Reques
 		// Handle the received executable and JSON info
 		err = st.processRegistration(executable, req.Info)
 		if err != nil {
-			log.Println(time.Now().Format(time.RFC3339) + "Registration failed4 for " + req.Executable)
+			log.Println(time.Now().Format(time.RFC3339) + "Registration failed4 for " + req.Info["name"])
 			http.Error(w, "Failed to process registration", http.StatusInternalServerError)
 			return
 		}
@@ -416,10 +418,6 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 			return
 		}
 		st.stdinPipe = stdin
-		defer func() {
-			st.stdinPipe.Close()
-			st.stdinPipe = nil
-		}()
 
 		// Set up output from the process
 		stdout, err := cmd.StdoutPipe()
@@ -427,12 +425,13 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 			fmt.Printf("Failed to create stdout pipe: %v\n", err)
 			return
 		}
-
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			fmt.Printf("Failed to create stderr pipe: %v\n", err)
-			return
-		}
+		st.stdoutPipe = stdout
+		defer func() {
+			st.stdinPipe.Close()
+			st.stdinPipe = nil
+			st.stdoutPipe.Close()
+			st.stdoutPipe = nil
+		}()
 
 		// Start the process
 		if err := cmd.Start(); err != nil {
@@ -440,8 +439,10 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 			return
 		}
 
+		log.Println(time.Now(), " Running executable ", executablePath, " as worker")
+
 		// Redirect output in a separate goroutine
-		go st.redirectOutput(info["name"], stdout, stderr)
+		go st.redirectOutput(info["name"], st.stdoutPipe)
 
 		// Wait for either process completion or shutdown signal
 		done := make(chan error, 1)
@@ -455,12 +456,17 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 			if err := cmd.Process.Kill(); err != nil {
 				fmt.Printf("Failed to kill process: %v\n", err)
 			}
+			if err := cmd.Wait(); err != nil {
+				fmt.Printf("Failed to wait kill: %v\n", err)
+			}
+			return
 		case err := <-done: // Process completed
 			if err != nil {
 				fmt.Printf("Executable finished with error: %v\n", err)
 			} else {
 				fmt.Printf("Executable finished successfully.\n")
 			}
+			return
 		}
 	}(info["name"])
 
@@ -469,10 +475,9 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 
 // redirectOutput processes the stdout and stderr of the executable
 // and sends it to another server's TCP based on certain conditions.
-func (st *StreamServer) redirectOutput(exe_name string, stdout, stderr io.ReadCloser) {
+func (st *StreamServer) redirectOutput(exe_name string, stdout io.ReadCloser) {
 	// Create readers for stdout and stderr
 	stdoutReader := bufio.NewReader(stdout)
-	stderrReader := bufio.NewReader(stderr)
 
 	// Redirect stdout and process the output
 	go func() {
@@ -485,28 +490,11 @@ func (st *StreamServer) redirectOutput(exe_name string, stdout, stderr io.ReadCl
 				break
 			}
 
-			fmt.Printf(line)
+			log.Printf(line)
 
 			// Redirect
 			key := strings.SplitN(line, ",", 2)[0]
 			sendToTCPServer(line, id_to_domain(st.emit_table[hashKey(key)%len(st.emit_table)])+":"+TCP_IN_PORT)
-		}
-	}()
-
-	// Redirect stderr and process the output (optional)
-	go func() {
-		for {
-			line, err := stderrReader.ReadString('\n')
-			if err != nil {
-				if err == io.EOF {
-					// Process finished, exit the loop gracefully
-					break
-				}
-				fmt.Printf("Error reading stderr: %v\n", err)
-				break
-			}
-
-			fmt.Println(line)
 		}
 	}()
 }
@@ -590,7 +578,7 @@ func (st *StreamServer) handleTCPConnection(conn net.Conn) {
 				if st.stype == TYPE_LEADER {
 
 					// Write the received content to the file
-					_, err := st.buffile.WriteString(fmt.Sprintf("%s\n", line))
+					_, err := st.buffile.WriteString(fmt.Sprintf("%s %s %s\n", time.Now().Format(time.RFC3339), conn.RemoteAddr(), line))
 					if err != nil {
 						log.Println("Failed to write content to file")
 						return
@@ -678,6 +666,9 @@ func fd(st *StreamServer) {
 			if st.start_flag {
 				fmt.Println("Fault tolerant processing... ", new_num, " machines left.")
 				st.start_flag = false
+				st.buffile, _ = os.OpenFile("tmp.txt", os.O_TRUNC|os.O_APPEND|os.O_RDWR|os.O_CREATE, 0644)
+				os.Truncate("tmp.txt", 0)
+				defer st.buffile.Close()
 
 				for _, i := range st.task1_workers {
 					req, err := http.NewRequest(http.MethodGet, "http://"+id_to_domain(i)+":"+WORKER_PORT+"/shutdown", nil)
@@ -699,7 +690,6 @@ func fd(st *StreamServer) {
 					client := &http.Client{}
 					client.Do(req)
 				}
-
 				st.distribute(st.srcFile, st.destFile, st.exe1, st.exe2)
 			}
 
