@@ -213,8 +213,8 @@ func (r *Receiver) Listen(ml *MembershipList) {
 						}
 						gMembers := ml.GetRandomMembers(G, excludeList)
 						// log.Printf("Passing on gossip of timestamp %s from %s about %s with: \n", timeStamp, requestAddr, topicAddr)
-						for i, gMember := range gMembers {
-							log.Println(i, gMember.IP)
+						for _, gMember := range gMembers {
+							// log.Println(i, gMember.IP)
 							gSender := NewSender(gMember.IP, GossipPort, r.myaddress)
 							if err := gSender.Gossip(parsedTime, topicAddr, state, requestAddr, inc); err != nil {
 								// log.Printf("Failed to send gossip to %s. With error: %s\n", gMember.IP, err.Error())

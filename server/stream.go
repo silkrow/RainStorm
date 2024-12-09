@@ -204,6 +204,7 @@ func (st *StreamServer) httpHandleShutdown(w http.ResponseWriter, r *http.Reques
 	case http.MethodGet:
 		log.Println(time.Now().Format(time.RFC3339 + "Shutdown command received"))
 		if st.exe != "" {
+			log.Println(time.Now(), "Shutdown signal sent")
 			close(st.exe_shutdown)
 		}
 
@@ -400,6 +401,7 @@ func (st *StreamServer) httpHandleRegister(w http.ResponseWriter, r *http.Reques
 }
 
 func (st *StreamServer) processRegistration(executable []byte, info map[string]string) error {
+	st.exe_shutdown = make(chan struct{})
 	// Save the executable to a file
 	err := os.WriteFile(info["name"], executable, 0700)
 	st.exe = info["name"]
@@ -452,7 +454,7 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 
 		select {
 		case <-st.exe_shutdown: // Received shutdown signal
-			fmt.Println("Shutdown signal received. Terminating process...")
+			fmt.Println(time.Now(), "Shutdown signal received. Terminating process...")
 			if err := cmd.Process.Kill(); err != nil {
 				fmt.Printf("Failed to kill process: %v\n", err)
 			}
@@ -476,25 +478,32 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 // redirectOutput processes the stdout and stderr of the executable
 // and sends it to another server's TCP based on certain conditions.
 func (st *StreamServer) redirectOutput(exe_name string, stdout io.ReadCloser) {
+	log.Println(time.Now(), "RedirectOutput routine called")
 	// Create readers for stdout and stderr
 	stdoutReader := bufio.NewReader(stdout)
 
 	// Redirect stdout and process the output
 	go func() {
 		for {
-			line, err := stdoutReader.ReadString('\n')
-			if err != nil {
-				if err != io.EOF {
-					fmt.Printf("Error reading stdout: %v\n", err)
+			select {
+			case <-st.exe_shutdown:
+				fmt.Println(time.Now(), "Received stop signal. Exiting redirectoutput loop.")
+				return
+			default:
+				line, err := stdoutReader.ReadString('\n')
+				if err != nil {
+					if err != io.EOF {
+						fmt.Printf("Error reading stdout: %v\n", err)
+					}
+					break
 				}
-				break
+
+				log.Printf(line)
+
+				// Redirect
+				key := strings.SplitN(line, ",", 2)[0]
+				sendToTCPServer(line, id_to_domain(st.emit_table[hashKey(key)%len(st.emit_table)])+":"+TCP_IN_PORT)
 			}
-
-			log.Printf(line)
-
-			// Redirect
-			key := strings.SplitN(line, ",", 2)[0]
-			sendToTCPServer(line, id_to_domain(st.emit_table[hashKey(key)%len(st.emit_table)])+":"+TCP_IN_PORT)
 		}
 	}()
 }
@@ -666,9 +675,6 @@ func fd(st *StreamServer) {
 			if st.start_flag {
 				fmt.Println("Fault tolerant processing... ", new_num, " machines left.")
 				st.start_flag = false
-				st.buffile, _ = os.OpenFile("tmp.txt", os.O_TRUNC|os.O_APPEND|os.O_RDWR|os.O_CREATE, 0644)
-				os.Truncate("tmp.txt", 0)
-				defer st.buffile.Close()
 
 				for _, i := range st.task1_workers {
 					req, err := http.NewRequest(http.MethodGet, "http://"+id_to_domain(i)+":"+WORKER_PORT+"/shutdown", nil)
@@ -690,6 +696,9 @@ func fd(st *StreamServer) {
 					client := &http.Client{}
 					client.Do(req)
 				}
+				time.Sleep(3 * time.Second)
+				os.Truncate("tmp.txt", 0)
+
 				st.distribute(st.srcFile, st.destFile, st.exe1, st.exe2)
 			}
 

@@ -90,10 +90,10 @@ func startFailureDetect(ml *MembershipList, myDomain string) {
 			kMembers := ml.GetRandomMembers(K, []string{myDomain, member.IP})
 			ackReceived := false
 
-			log.Println("Checking live status of " + member.IP + " with")
+			// log.Println("Checking live status of " + member.IP + " with")
 
-			for i, kMember := range kMembers {
-				log.Println(i, kMember.IP)
+			for _, kMember := range kMembers {
+				// log.Println(i, kMember.IP)
 				kSender := NewSender(kMember.IP, RepingPort, myDomain)
 				if err := kSender.Reping(RepingTimeout, member.IP); err == nil {
 					ackReceived = true
