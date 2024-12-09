@@ -456,10 +456,10 @@ func (st *StreamServer) processRegistration(executable []byte, info map[string]s
 		case <-st.exe_shutdown: // Received shutdown signal
 			fmt.Println(time.Now(), "Shutdown signal received. Terminating process...")
 			if err := cmd.Process.Kill(); err != nil {
-				fmt.Printf("Failed to kill process: %v\n", err)
+				// fmt.Printf("Failed to kill process: %v\n", err)
 			}
 			if err := cmd.Wait(); err != nil {
-				fmt.Printf("Failed to wait kill: %v\n", err)
+				// fmt.Printf("Failed to wait kill: %v\n", err)
 			}
 			return
 		case err := <-done: // Process completed
@@ -523,7 +523,7 @@ func sendToTCPServer(output, serverAddress string) {
 	// Send the processed message to the server
 	_, err = conn.Write([]byte(message))
 	if err != nil {
-		fmt.Printf("Failed to send message to server: %v\n", err)
+		// fmt.Printf("Failed to send message to server: %v\n", err)
 		return
 	}
 }
@@ -539,7 +539,7 @@ func tcpServer(st *StreamServer) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Printf("Failed to accept connection: %v\n", err)
+			// fmt.Printf("Failed to accept connection: %v\n", err)
 			continue
 		}
 

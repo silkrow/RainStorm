@@ -19,15 +19,13 @@ for vm in "${target_vms[@]}"; do
 
   # SSH to the remote VM and simulate Ctrl+C (SIGINT)
   ssh -o StrictHostKeyChecking=no "$target_ip" <<EOF
-  # Get the PID of the 'go run' process
   pid=\$(pgrep -f "screen")
   
-  # If a 'go run' process is found, simulate Ctrl+C by sending SIGINT
   if [ -n "\$pid" ]; then
     echo "Sending SIGINT (Ctrl+C) to PID \$pid"
     kill -2 \$pid  # Send SIGINT (Ctrl+C) to the process
   else
-    echo "No 'go run' process found."
+    echo "No 'screen' process found."
   fi
 EOF
 done
