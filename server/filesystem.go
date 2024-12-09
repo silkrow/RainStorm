@@ -1068,7 +1068,7 @@ func (fs *FileServer) httpHandleGetting(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		defer file.Close()
-		fmt.Println("Reacting to get request for file " + filename)
+		// fmt.Println("Reacting to get request for file " + filename)
 
 		w.WriteHeader(http.StatusOK)
 		if _, err := io.Copy(w, file); err != nil {
